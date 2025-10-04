@@ -85,7 +85,7 @@ build_and_push_image() {
 
     echo "Creating ECR repository if it doesn't exist..."
     # Create ECR repository if it doesn't exist
-    aws ecr create-repository --repository-name "${IMAGE_NAME}" --region $REGION || true
+    # aws ecr create-repository --repository-name "${IMAGE_NAME}" --region $REGION || true
 
     echo "Logging in to ECR..."
     # Log in to ECR
@@ -106,7 +106,7 @@ echo "Building and pushing Lambda image..."
 build_and_push_image "$LAMBDA_REPO" "$TAG" "../src/Dockerfile"
 
 echo "Building and pushing ECS/Fargate image..."
-build_and_push_image "$ECS_REPO" "$TAG" "../src/Dockerfile_ecs"
+# build_and_push_image "$ECS_REPO" "$TAG" "../src/Dockerfile_ecs"
 
 echo "================================================"
 echo "✅ All images successfully pushed!"
@@ -115,7 +115,7 @@ echo ""
 echo "Your container image URIs:"
 ACCOUNT_ID=$(aws sts get-caller-identity --region $AWS_REGION --query Account --output text)
 echo "  Lambda: ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${LAMBDA_REPO}:${TAG}"
-echo "  ECS/Fargate: ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECS_REPO}:${TAG}"
+# echo "  ECS/Fargate: ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECS_REPO}:${TAG}"
 echo ""
 echo "Next steps:"
 echo "  1. Download the CloudFormation templates from deployment/ folder"
