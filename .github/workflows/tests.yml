@@ -1,0 +1,27 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# The job only needs to read the code it tests. Declared explicitly so the
+# GITHUB_TOKEN does not inherit a read-write repository default.
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r src/requirements-dev.txt
+      - name: Run tests
+        run: python -m pytest tests/ -v
+      # Lint is enforced by the ruff hooks in .pre-commit-config.yaml rather than
+      # here: `ruff check`/`ruff format --check` do not pass repo-wide yet, and
+      # fixing that would mean reformatting files unrelated to any given change.

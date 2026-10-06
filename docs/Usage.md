@@ -10,12 +10,40 @@ export OPENAI_BASE_URL=<API base url>
 ```
 
 **API Example:**
+- [Supported Anthropic models](#supported-anthropic-models)
 - [Models API](#models-api)
 - [Embedding API](#embedding-api)
 - [Multimodal API](#multimodal-api)
 - [Tool Call](#tool-call)
 - [Reasoning](#reasoning)
 - [Interleaved thinking (beta)](#Interleaved thinking (beta))
+
+## Supported Anthropic models
+
+AWS offers the current Claude models through **cross-region inference profiles** rather than on-demand throughput. Passing the bare base model ID to those models fails with an HTTP 400, so you must call them with a prefixed ID such as `us.<base-id>` or `global.<base-id>` (or the full inference profile ARN). The prefix determines routing and pricing: `global.` lets Bedrock route the request to any supported commercial region and AWS prices it at approximately **10% below standard**, while a geographic prefix (`us.`, `eu.`, `apac.`, `jp.`, `au.`) keeps processing inside that geography at **standard pricing**. There is no additional routing charge either way, and the price is calculated from the region you call from - see AWS's [cross-Region inference](https://docs.aws.amazon.com/bedrock/latest/userguide/cross-region-inference.html) guide. Choose a geographic prefix for data residency, `global.` for cost.
+
+| Model | Base Bedrock model ID | Available prefixes |
+|---|---|---|
+| Claude Opus 4.6 | `anthropic.claude-opus-4-6-v1` | `global.` `us.` `eu.` `jp.` `apac.` |
+| Claude Opus 4.5 | `anthropic.claude-opus-4-5-20251101-v1:0` | `global.` `us.` `eu.` |
+| Claude Sonnet 4.6 | `anthropic.claude-sonnet-4-6` | `global.` `us.` `eu.` `jp.` |
+| Claude Haiku 4.5 | `anthropic.claude-haiku-4-5-20251001-v1:0` | `global.` `us.` `eu.` |
+
+Source: Anthropic's [Claude on Amazon Bedrock (legacy integration)](https://platform.claude.com/docs/en/build-with-claude/claude-on-amazon-bedrock-legacy) guide, section *API model IDs*. That page is the authoritative base-ID and prefix table for the `InvokeModel`/`Converse` APIs this proxy calls.
+
+**Claude Sonnet 4.5** (`anthropic.claude-sonnet-4-5-20250929-v1:0`, prefixes `global.` `us.` `eu.` `jp.`) still works but is deprecated. Move to **Claude Sonnet 4.6** instead.
+
+A prefix column above only tells you the profile *can* exist. The [Models API](#models-api) is the authoritative list for the region you actually deployed into - run it and use an ID it returns. See also AWS's [Supported Regions and models for inference profiles](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html).
+
+> **`top_p` is not forwarded to this generation.** Bedrock Converse was observed rejecting `temperature` and `topP` together on **Claude Sonnet 4.5** only; Anthropic publishes the restriction only for [thinking requests](https://platform.claude.com/docs/en/build-with-claude/thinking) and documents no unconditional one for the rest of the generation. The proxy still applies the workaround conservatively across the family, dropping `top_p` from **every** request whose model ID contains `claude-sonnet-4-5`, `claude-opus-4-5`, `claude-haiku-4-5`, `claude-sonnet-4-6` or `claude-opus-4-6` - thinking or not. Dropping `top_p` rather than `temperature` keeps the parameter OpenAI clients actually set. If you need `top_p`, use a model outside this list. One exception: a request addressed to an **application inference profile ARN** still carries `top_p`, because the ARN ends in an opaque profile ID and never names the model, so the proxy cannot tell which model it points at.
+
+### Cross-region inference profile discovery
+
+The proxy builds its model list from the `ListInferenceProfiles` response of the region it runs in, so every system-defined prefix AWS offers there is picked up automatically - `us.`, `eu.`, `apac.`, `jp.`, `au.` and `global.`, plus any prefix AWS adds in future. Nothing is inferred from `AWS_REGION`, and no profile ID is ever synthesised: if the region does not return it, the proxy does not advertise it.
+
+Set `ENABLE_CROSS_REGION_INFERENCE=false` to suppress all profile IDs and list only models with on-demand throughput.
+
+> **Note:** Because the current Claude models have no on-demand entitlement, turning cross-region inference off will hide them from the model list entirely. It also makes the built-in fallback model unusable, since that is a `global.` profile ID: with `ENABLE_CROSS_REGION_INFERENCE=false` you must set `DEFAULT_MODEL` to an ID the list still contains, otherwise every request that falls back to the default - including the `gpt-*` aliases - is rejected as an unsupported model.
 
 ## Models API
 
@@ -36,13 +64,13 @@ curl -s $OPENAI_BASE_URL/models -H "Authorization: Bearer $OPENAI_API_KEY" | jq 
 [
   ...
   {
-    "id": "anthropic.claude-3-5-sonnet-20240620-v1:0",
+    "id": "global.anthropic.claude-haiku-4-5-20251001-v1:0",
     "created": 1734416893,
     "object": "model",
     "owned_by": "bedrock"
   },
   {
-    "id": "us.anthropic.claude-3-5-sonnet-20240620-v1:0",
+    "id": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
     "created": 1734416893,
     "object": "model",
     "owned_by": "bedrock"
@@ -53,9 +81,9 @@ curl -s $OPENAI_BASE_URL/models -H "Authorization: Bearer $OPENAI_API_KEY" | jq 
 
 ## Chat Completions API
 
-### Basic Example with Claude Sonnet 4.5
+### Basic Example with Claude Haiku 4.5
 
-Claude Sonnet 4.5 is Anthropic's most intelligent model, excelling at coding, complex reasoning, and agent-based tasks. It's available via global cross-region inference profiles.
+Claude Haiku 4.5 is the fastest and cheapest model of the current Claude generation, which makes it a good default for everyday requests. It is the default model this proxy falls back to when `DEFAULT_MODEL` is not set.
 
 **Example Request**
 
@@ -64,7 +92,7 @@ curl $OPENAI_BASE_URL/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $OPENAI_API_KEY" \
   -d '{
-    "model": "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "model": "global.anthropic.claude-haiku-4-5-20251001-v1:0",
     "messages": [
       {
         "role": "user",
@@ -81,11 +109,30 @@ from openai import OpenAI
 
 client = OpenAI()
 completion = client.chat.completions.create(
-    model="global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    model="global.anthropic.claude-haiku-4-5-20251001-v1:0",
     messages=[{"role": "user", "content": "Write a Python function to calculate the Fibonacci sequence using dynamic programming."}],
 )
 
 print(completion.choices[0].message.content)
+```
+
+### Frontier Example with Claude Opus 4.6
+
+Claude Opus 4.6 is the most capable model reachable through this proxy. Swap the model ID in for the hardest coding, reasoning and agentic work.
+
+```bash
+curl $OPENAI_BASE_URL/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -d '{
+    "model": "global.anthropic.claude-opus-4-6-v1",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Write a Python function to calculate the Fibonacci sequence using dynamic programming."
+      }
+    ]
+  }'
 ```
 
 ## Embedding API
@@ -234,7 +281,7 @@ curl $OPENAI_BASE_URL/chat/completions \
 {
     "id": "msg_01BY3wcz41x7XrKhxY3VzWke",
     "created": 1712543069,
-    "model": "anthropic.claude-3-sonnet-20240229-v1:0",
+    "model": "global.anthropic.claude-haiku-4-5-20251001-v1:0",
     "system_fingerprint": "fp",
     "choices": [
         {
@@ -325,7 +372,7 @@ curl $OPENAI_BASE_URL/chat/completions \
 {
     "id": "msg_01PjrKDWhYGsrTNdeqzWd6D9",
     "created": 1712543689,
-    "model": "anthropic.claude-3-sonnet-20240229-v1:0",
+    "model": "global.anthropic.claude-haiku-4-5-20251001-v1:0",
     "system_fingerprint": "fp",
     "choices": [
         {
@@ -363,22 +410,24 @@ You can try it with different questions, such as:
 ## Reasoning
 
 **Important Notice**: Please carefully review the following points before using reasoning mode for Chat completion API.
-- Only Claude 3.7 Sonnet (extended thinking) and DeepSeek R1 support Reasoning so far. Please make sure the model supports reasoning before use.
-- For Claude 3.7 Sonnet, the reasoning mode (or thinking mode) is not enabled by default, you must pass additional `reasoning_effort` parameter in your request. Please also provide the right max_tokens (or max_completion_tokens) in your request. The budget_tokens is based on reasoning_effort (low: 30%, medium: 60%, high: 100% of max tokens), ensuring minimum budget_tokens of 1,024 with Anthropic recommending at least 4,000 tokens for comprehensive reasoning. Check [Bedrock Document](https://docs.aws.amazon.com/bedrock/latest/userguide/model-parameters-anthropic-claude-37.html) for more details.
+- Reasoning is supported by the Claude models that offer extended thinking and by DeepSeek R1. Please make sure the model supports reasoning before use. Among the models reachable through this proxy, extended thinking is available on Claude Opus 4.6, Claude Opus 4.5, Claude Sonnet 4.6 and Claude Haiku 4.5. On Claude Opus 4.6 and Claude Sonnet 4.6 it is deprecated in favour of [adaptive thinking](#adaptive-thinking-and-the-effort-parameter).
+- For Claude, the reasoning mode (or thinking mode) is not enabled by default, you must pass an additional `reasoning_effort` parameter in your request. Please also provide the right max_tokens (or max_completion_tokens) in your request. The budget_tokens is based on reasoning_effort (low: 30%, medium: 60%, high: 100% of max tokens), clamped to a minimum of 1,024 with Anthropic recommending at least 4,000 tokens for comprehensive reasoning. Because the budget must leave room for the answer, a reasoning request with `max_tokens` (or `max_completion_tokens`) of 1,024 or less is rejected with an HTTP 400 - ask for more tokens instead. The check runs before the response begins, so streaming callers get a real 400 rather than an error event inside the stream. Just above that floor the clamp takes most of the output window: `max_tokens` of 1,500 at `low` effort leaves only 476 tokens for the answer, which can come back truncated or empty (the proxy logs a warning when the clamp bites). Give a reasoning request a few thousand tokens. Check [Bedrock Document](https://docs.aws.amazon.com/bedrock/latest/userguide/claude-messages-extended-thinking.html) for more details.
+- `temperature` and `top_p` are **not** forwarded while thinking is on. Anthropic documents `temperature` and `top_k` as incompatible with thinking, and `top_p` as valid only between 0.95 and 1, so the proxy drops both rather than letting Bedrock reject the request. See [Extended thinking - sampling parameters](https://platform.claude.com/docs/en/build-with-claude/thinking). Any value you set for them is ignored on a thinking request.
 - For DeepSeek R1, you don't need additional reasoning_effort parameter, otherwise, you may get an error.
 - The reasoning response (CoT, thoughts) is added in an additional tag 'reasoning_content' which is not officially supported by OpenAI. This is to follow [Deepseek Reasoning Model](https://api-docs.deepseek.com/guides/reasoning_model#api-example). This may be changed in the future.
 
 **Example Request**
 
-- Claude 3.7 Sonnet
+- Claude Haiku 4.5
 
 ```bash
 curl $OPENAI_BASE_URL/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $OPENAI_API_KEY" \
   -d '{
-    "model": "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+    "model": "global.anthropic.claude-haiku-4-5-20251001-v1:0",
     "messages": [
+        {
             "role": "user",
             "content": "which one is bigger, 3.9 or 3.11?"
         }
@@ -413,7 +462,7 @@ curl $OPENAI_BASE_URL/chat/completions \
 {
     "id": "chatcmpl-83fb7a88",
     "created": 1740545278,
-    "model": "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+    "model": "global.anthropic.claude-haiku-4-5-20251001-v1:0",
     "system_fingerprint": "fp",
     "choices": [
         {
@@ -446,7 +495,7 @@ client = OpenAI()
 
 messages = [{"role": "user", "content": "which one is bigger, 3.9 or 3.11?"}]
 response = client.chat.completions.create(
-    model="us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+    model="global.anthropic.claude-haiku-4-5-20251001-v1:0",
     messages=messages,
     reasoning_effort="low",
     max_completion_tokens=4096,
@@ -464,7 +513,7 @@ client = OpenAI()
 
 messages = [{"role": "user", "content": "9.11 and 9.8, which is greater?"}]
 response = client.chat.completions.create(
-    model="us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+    model="global.anthropic.claude-haiku-4-5-20251001-v1:0",
     messages=messages,
     reasoning_effort="low",
     max_completion_tokens=4096,
@@ -481,6 +530,40 @@ for chunk in response:
         content += chunk.choices[0].delta.content
 ```
 
+### Adaptive thinking and the effort parameter
+
+On **Claude Opus 4.6** and **Claude Sonnet 4.6**, manual extended thinking (`thinking.type: "enabled"` with an explicit `budget_tokens`) is deprecated. Those models use *adaptive* thinking instead: Claude decides when and how deeply to think, and you steer it with an `effort` level (`low`, `medium`, `high`, `max`) rather than a token budget. Anthropic documents adaptive thinking as the supported mode for both models and lists `effort` support on Claude Opus 4.5, Claude Opus 4.6 and Claude Sonnet 4.6. See [Extended thinking](https://platform.claude.com/docs/en/build-with-claude/thinking) and [Effort](https://platform.claude.com/docs/en/build-with-claude/effort).
+
+Thinking is **off** on both models until you send a thinking block: Anthropic's per-model configuration table reads *Thinking off* for a request with no thinking field, and says thinking stays off "until you set `thinking: {type: "adaptive"}`". An `effort` level on its own does not turn thinking on - effort applies to every output token and "works whether or not thinking is enabled". So send `thinking` to get thinking, and use `effort` to steer how much of it you get.
+
+This proxy needs no new parameter for either: anything you put in `extra_body` is forwarded verbatim as the Bedrock Converse `additionalModelRequestFields`, so you can pass the model's own thinking and effort fields straight through.
+
+```bash
+curl $OPENAI_BASE_URL/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -d '{
+    "model": "global.anthropic.claude-opus-4-6-v1",
+    "max_tokens": 8192,
+    "messages": [
+        {
+            "role": "user",
+            "content": "which one is bigger, 3.9 or 3.11?"
+        }
+    ],
+    "extra_body": {
+        "thinking": {"type": "adaptive"},
+        "output_config": {"effort": "medium"}
+    }
+}'
+```
+
+> **Unverified:** `thinking.type: "adaptive"` and `output_config.effort` are the field names Anthropic documents for its **Messages API**. We could not find an AWS-published statement of how those fields are named inside the Converse API's `additionalModelRequestFields`, and no live Bedrock call was made to confirm it, so treat the payload above as a template rather than a verified contract. If Bedrock rejects it with a `ValidationException` about an unexpected field, check the current [Bedrock inference request parameters](https://docs.aws.amazon.com/bedrock/latest/userguide/model-parameters-anthropic-claude-messages.html) for the accepted spelling and adjust `extra_body` - no change to this proxy is needed either way.
+
+> **Note:** `temperature` and `top_p` are dropped from any request whose `extra_body` carries a `thinking` block (adaptive or manual) or a `reasoning_config`, because Anthropic documents both parameters as incompatible with thinking. A block that explicitly turns thinking **off** - `"thinking": {"type": "disabled"}`, which the per-model table lists as *Thinking off* for this whole generation - is not a thinking request, so it keeps them. They are **not** dropped for an `extra_body` that only carries `output_config` either: neither an `output_config.effort` level nor an `output_config.format` [structured-output](https://platform.claude.com/docs/en/build-with-claude/structured-outputs) schema turns thinking on, so those requests keep the sampling parameters you set. `top_p` is still dropped for the Claude 4.5/4.6 generation by the model-family rule in [Supported Anthropic models](#supported-anthropic-models), whatever `extra_body` contains.
+
+Note that `reasoning_effort` and `extra_body` are different paths: `reasoning_effort` makes the proxy compute a `budget_tokens` value for you (manual extended thinking), while `extra_body` hands your fields to Bedrock untouched. Use one or the other, not both.
+
 ## Interleaved thinking (beta)
 
 **Important Notice**: Please carefully review the following points before using reasoning mode for Chat completion API.
@@ -488,18 +571,20 @@ for chunk in response:
 Extended thinking with tool use in Claude 4 models supports [interleaved thinking](https://docs.aws.amazon.com/bedrock/latest/userguide/claude-messages-extended-thinking.html#claude-messages-extended-thinking-tool-use-interleaved) enables Claude 4 models to think between tool calls and run more sophisticated reasoning after receiving tool results. which is helpful for more complex agentic interactions.
 With interleaved thinking, the `budget_tokens` can exceed the `max_tokens` parameter because it represents the total budget across all thinking blocks within one assistant turn.
 
-**Supported Models**: Claude Sonnet 4, Claude Sonnet 4.5
+**Supported Models**: the Claude models that offer extended thinking. Of the models reachable through this proxy that is Claude Opus 4.5 and Claude Haiku 4.5, plus Claude Opus 4.6 and Claude Sonnet 4.6 where extended thinking still works but is deprecated - prefer [adaptive thinking](#adaptive-thinking-and-the-effort-parameter) on those two.
+
+> **Note:** `temperature` and `top_p` are dropped from the request whenever `extra_body` contains a `thinking` block or a `reasoning_config`, because Anthropic documents them as incompatible with thinking. A `"thinking": {"type": "disabled"}` block is the exception - it turns thinking off, so the sampling parameters survive.
 
 **Example Request**
 
-- Non-Streaming (Claude Sonnet 4.5)
+- Non-Streaming (Claude Opus 4.5)
 
 ```bash
 curl http://127.0.0.1:8000/api/v1/chat/completions \
 -H "Content-Type: application/json" \
 -H "Authorization: Bearer bedrock" \
 -d '{
-"model": "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+"model": "global.anthropic.claude-opus-4-5-20251101-v1:0",
 "max_tokens": 2048,
 "messages": [{
 "role": "user",
@@ -512,14 +597,14 @@ curl http://127.0.0.1:8000/api/v1/chat/completions \
 }'
 ```
 
-- Non-Streaming (Claude Sonnet 4)
+- Non-Streaming (Claude Haiku 4.5)
 
 ```bash
 curl http://127.0.0.1:8000/api/v1/chat/completions \
 -H "Content-Type: application/json" \
 -H "Authorization: Bearer bedrock" \
 -d '{
-"model": "us.anthropic.claude-sonnet-4-20250514-v1:0",
+"model": "global.anthropic.claude-haiku-4-5-20251001-v1:0",
 "max_tokens": 2048,
 "messages": [{
 "role": "user",
@@ -532,14 +617,14 @@ curl http://127.0.0.1:8000/api/v1/chat/completions \
 }'
 ```
 
-- Streaming (Claude Sonnet 4.5)
+- Streaming (Claude Opus 4.5)
 
 ```bash
 curl http://127.0.0.1:8000/api/v1/chat/completions \
 -H "Content-Type: application/json" \
 -H "Authorization: Bearer bedrock" \
 -d '{
-"model": "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+"model": "global.anthropic.claude-opus-4-5-20251101-v1:0",
 "max_tokens": 2048,
 "messages": [{
 "role": "user",
@@ -553,14 +638,14 @@ curl http://127.0.0.1:8000/api/v1/chat/completions \
 }'
 ```
 
-- Streaming (Claude Sonnet 4)
+- Streaming (Claude Haiku 4.5)
 
 ```bash
 curl http://127.0.0.1:8000/api/v1/chat/completions \
 -H "Content-Type: application/json" \
 -H "Authorization: Bearer bedrock" \
 -d '{
-"model": "us.anthropic.claude-sonnet-4-20250514-v1:0",
+"model": "global.anthropic.claude-haiku-4-5-20251001-v1:0",
 "max_tokens": 2048,
 "messages": [{
 "role": "user",

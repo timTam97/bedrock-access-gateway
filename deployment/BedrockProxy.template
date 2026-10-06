@@ -9,7 +9,7 @@ Parameters:
     Description: The ECR image URI for the Lambda function (e.g., 123456789012.dkr.ecr.us-east-1.amazonaws.com/bedrock-proxy-api:latest)
   DefaultModelId:
     Type: String
-    Default: anthropic.claude-3-sonnet-20240229-v1:0
+    Default: global.anthropic.claude-haiku-4-5-20251001-v1:0
     Description: The default model ID, please make sure the model ID is supported in the current region
 Resources:
   ProxyApiHandlerServiceRoleBE71BFB1:
