@@ -8,10 +8,12 @@ cross-region inference profile prefixes each one is published under, because the
 topP handling has to work on prefixed profile IDs as well as bare IDs.
 """
 
+import logging
+
 import pytest
 from fastapi import HTTPException
 
-from api.models.bedrock import BedrockModel
+from api.models.bedrock import BedrockModel, requires_top_p_removal
 from api.schema import ChatRequest, UserMessage
 
 MESSAGES = [UserMessage(role="user", content="Hello")]
@@ -79,15 +81,45 @@ def test_thinking_in_extra_body_drops_temperature_and_top_p(model):
     assert args["additionalModelRequestFields"] == extra_body
 
 
-def test_extra_body_without_thinking_leaves_sampling_parameters_alone(model):
-    # Adaptive thinking on Opus 4.6 / Sonnet 4.6 rides on this passthrough.
-    extra_body = {"effort": "high"}
+def test_extra_body_unrelated_to_thinking_leaves_sampling_parameters_alone(model):
+    # A beta header passthrough says nothing about thinking, so nothing is dropped.
+    extra_body = {"anthropic_beta": ["interleaved-thinking-2025-05-14"]}
 
     args = parse(model, model=OUT_OF_FAMILY_MODEL_ID, extra_body=extra_body)
 
     assert args["inferenceConfig"]["temperature"] == 1.0
     assert args["inferenceConfig"]["topP"] == 1.0
     assert args["additionalModelRequestFields"] == extra_body
+
+
+@pytest.mark.parametrize(
+    "extra_body",
+    [
+        {"thinking": {"type": "adaptive"}},
+        {"output_config": {"effort": "medium"}},
+        {"effort": "medium"},
+        {"reasoning_config": {"type": "enabled", "budget_tokens": 2048}},
+    ],
+)
+def test_adaptive_thinking_extra_body_drops_temperature_and_top_p(model, extra_body):
+    # Adaptive thinking on Opus 4.6 / Sonnet 4.6 is steered by an effort level rather
+    # than a thinking block, and thinking is on either way, so temperature and topP
+    # have to go. See THINKING_EXTRA_BODY_KEYS.
+    args = parse(model, model="global.anthropic.claude-opus-4-6-v1", extra_body=extra_body)
+
+    assert "temperature" not in args["inferenceConfig"]
+    assert "topP" not in args["inferenceConfig"]
+    assert args["additionalModelRequestFields"] == extra_body
+
+
+def test_application_inference_profile_arn_keeps_top_p(model):
+    # Known gap, recorded rather than silently assumed away: an application inference
+    # profile ARN ends in an opaque profile id and never names the model, so the
+    # Claude 4.5/4.6 fragment check cannot match it.
+    arn = "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/abcdef123456"
+
+    assert requires_top_p_removal(arn) is False
+    assert parse(model, model=arn)["inferenceConfig"]["topP"] == 1.0
 
 
 def test_budget_tokens_is_clamped_to_the_bedrock_minimum(model):
@@ -98,6 +130,22 @@ def test_budget_tokens_is_clamped_to_the_bedrock_minimum(model):
 
 def test_budget_tokens_for_high_effort_is_one_below_max_tokens(model):
     assert model._calc_budget_tokens(10000, "high") == 9999
+
+
+def test_clamped_budget_warns_when_little_is_left_for_the_answer(model, caplog):
+    # max_tokens=1500 at effort "low" computes 450, so the clamp to 1024 leaves only
+    # 476 tokens for the answer. The request is valid but the answer may be cut off.
+    with caplog.at_level(logging.WARNING, logger="api.models.bedrock"):
+        assert model._calc_budget_tokens(1500, "low") == 1024
+
+    assert "may be truncated" in caplog.text
+
+
+def test_budget_tokens_well_above_the_floor_does_not_warn(model, caplog):
+    with caplog.at_level(logging.WARNING, logger="api.models.bedrock"):
+        assert model._calc_budget_tokens(10000, "low") == 3000
+
+    assert caplog.text == ""
 
 
 @pytest.mark.parametrize("max_tokens", [1, 1023, 1024])

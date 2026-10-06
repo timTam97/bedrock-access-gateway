@@ -40,6 +40,26 @@ GitHub provides additional document on [forking a repository](https://help.githu
 [creating a pull request](https://help.github.com/articles/creating-a-pull-request/).
 
 
+## Running the tests and linters locally
+
+The test suite needs no AWS credentials - every Bedrock call is stubbed.
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r src/requirements-dev.txt
+python -m pytest tests/ -v
+```
+
+The same suite runs on every pull request via [.github/workflows/tests.yml](.github/workflows/tests.yml).
+
+Lint and formatting are handled by [ruff](https://docs.astral.sh/ruff/) through pre-commit. Install the hooks once so they run on each commit:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+
 ## Finding contributions to work on
 Looking at the existing issues is a great way to find something to contribute on. As our projects, by default, use the default GitHub issue labels (enhancement/bug/duplicate/help wanted/invalid/question/wontfix), looking at any 'help wanted' issues is a great place to start.
 

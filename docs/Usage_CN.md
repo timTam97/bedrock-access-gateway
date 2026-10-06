@@ -21,7 +21,7 @@ export OPENAI_BASE_URL=<API base url>
 
 ## 支持的 Anthropic 模型
 
-AWS 通过**跨区域推理配置文件（cross-region inference profile）**而非按需吞吐量（on-demand throughput）提供当前这一代 Claude 模型。对这些模型直接传入基础模型 ID 会返回 HTTP 400 错误，因此必须使用带前缀的 ID，例如 `us.<base-id>` 或 `global.<base-id>`（也可以传入完整的推理配置文件 ARN）。前缀决定了路由方式和价格：`global.` 会动态路由以获得最高可用性且不额外收费，而区域前缀保证流量只经过指定地理区域，但会有 10% 的价格溢价。
+AWS 通过**跨区域推理配置文件（cross-region inference profile）**而非按需吞吐量（on-demand throughput）提供当前这一代 Claude 模型。对这些模型直接传入基础模型 ID 会返回 HTTP 400 错误，因此必须使用带前缀的 ID，例如 `us.<base-id>` 或 `global.<base-id>`（也可以传入完整的推理配置文件 ARN）。前缀决定了路由方式和价格：`global.` 允许 Bedrock 将请求路由到任意受支持的商业区域，AWS 对其定价比标准价格**低约 10%**；而地理前缀（`us.`、`eu.`、`apac.`、`jp.`、`au.`）保证处理过程留在该地理区域内，按**标准价格**计费。两者都不收取额外的路由费用，价格按你发起调用的区域计算 —— 详见 AWS 的 [cross-Region inference](https://docs.aws.amazon.com/bedrock/latest/userguide/cross-region-inference.html) 文档。有数据驻留要求时选择地理前缀，优先考虑成本时选择 `global.`。
 
 | 模型 | Bedrock 基础模型 ID | 可用前缀 |
 |---|---|---|
@@ -36,13 +36,15 @@ AWS 通过**跨区域推理配置文件（cross-region inference profile）**而
 
 上表中的前缀列只说明该配置文件*可能*存在。[Models API](#models-api) 才是你实际部署区域的权威列表 —— 请先运行它，并使用它返回的 ID。另请参阅 AWS 的 [Supported Regions and models for inference profiles](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html)。
 
+> **这一代模型不会转发 `top_p`。** Bedrock Converse 在这些模型上不接受同时传入 `temperature` 和 `topP`，因此只要模型 ID 中包含 `claude-sonnet-4-5`、`claude-opus-4-5`、`claude-haiku-4-5`、`claude-sonnet-4-6` 或 `claude-opus-4-6`，本代理就会从**每一个**请求中丢弃 `top_p` —— 无论是否开启思考模式。丢弃 `top_p` 而保留 `temperature`，是因为后者才是 OpenAI 客户端真正会设置的参数。该限制最初是在 Claude Sonnet 4.5 上观察到的，这里保守地推广到了整代模型；Anthropic 官方只针对[思考请求](https://platform.claude.com/docs/en/build-with-claude/thinking)说明了这一限制。如果你确实需要 `top_p`，请改用该列表之外的模型。有一个例外：发往**应用推理配置文件 ARN**（application inference profile ARN）的请求仍会携带 `top_p`，因为该 ARN 以不透明的配置文件 ID 结尾、不含模型名称，代理无法判断它指向哪个模型。
+
 ### 跨区域推理配置文件的发现机制
 
 本代理会根据所在区域的 `ListInferenceProfiles` 响应来构建模型列表，因此该区域提供的所有系统定义前缀都会被自动识别 —— `us.`、`eu.`、`apac.`、`jp.`、`au.` 和 `global.`，以及 AWS 未来新增的任何前缀。前缀不再根据 `AWS_REGION` 推断，也不会凭空拼接出任何配置文件 ID：如果该区域没有返回它，代理就不会对外提供它。
 
 设置 `ENABLE_CROSS_REGION_INFERENCE=false` 可以屏蔽所有配置文件 ID，只列出具备按需吞吐量的模型。
 
-> **注意**：由于当前这一代 Claude 模型没有按需吞吐量权限，关闭跨区域推理会导致它们完全不出现在模型列表中。
+> **注意**：由于当前这一代 Claude 模型没有按需吞吐量权限，关闭跨区域推理会导致它们完全不出现在模型列表中。这同时也会让内置的默认模型失效，因为它是一个 `global.` 配置文件 ID：在 `ENABLE_CROSS_REGION_INFERENCE=false` 时，你必须把 `DEFAULT_MODEL` 设置为模型列表中仍然存在的 ID，否则所有回退到默认模型的请求（包括 `gpt-*` 别名）都会被判定为不支持的模型而被拒绝。
 
 ## Models API
 
@@ -406,7 +408,7 @@ You can try it with different questions, such as:
 **重要**: 使用此 reasoning 推理模式前，请仔细阅读以下要点。
 
 - 支持扩展思考（extended thinking）的 Claude 模型以及 Deepseek R1 支持推理功能。使用前请确保所用模型支持推理。在本代理可访问的模型中，支持扩展思考的是 Claude Opus 4.6、Claude Opus 4.5、Claude Sonnet 4.6 和 Claude Haiku 4.5。在 Claude Opus 4.6 和 Claude Sonnet 4.6 上，扩展思考已被弃用，取而代之的是[自适应思考](#自适应思考与-effort-参数)。
-- Claude 的推理模式（或思考模式）默认未启用，您必须在请求中传递额外的 reasoning_effort 参数，参数值可选:low，medium, high。另外，请在请求中提供正确的 max_tokens（或 max_completion_tokens）参数。budget_tokens 基于 reasoning_effort 设置（低：30%，中：60%，高：100% 的max tokens），并会被限制为最小 1,024，Anthropic 建议至少使用 4,000 个令牌以获得全面的推理。由于思考预算必须为答案留出空间，当 `max_tokens`（或 `max_completion_tokens`）小于或等于 1,024 时，推理请求会被拒绝并返回 HTTP 400 —— 请改为申请更多 token。详情请参阅 [Bedrock Document](https://docs.aws.amazon.com/bedrock/latest/userguide/claude-messages-extended-thinking.html)。
+- Claude 的推理模式（或思考模式）默认未启用，您必须在请求中传递额外的 reasoning_effort 参数，参数值可选:low，medium, high。另外，请在请求中提供正确的 max_tokens（或 max_completion_tokens）参数。budget_tokens 基于 reasoning_effort 设置（低：30%，中：60%，高：100% 的max tokens），并会被限制为最小 1,024，Anthropic 建议至少使用 4,000 个令牌以获得全面的推理。由于思考预算必须为答案留出空间，当 `max_tokens`（或 `max_completion_tokens`）小于或等于 1,024 时，推理请求会被拒绝并返回 HTTP 400 —— 请改为申请更多 token。该校验在响应开始之前执行，因此流式调用方同样会收到真正的 400，而不是流内部的错误事件。略高于该下限时，钳制会占去输出窗口的大部分：`max_tokens` 为 1,500 且 effort 为 `low` 时，留给答案的只有 476 个 token，回答可能被截断甚至为空（钳制生效时代理会记录一条 warning 日志）。请为推理请求预留数千个 token。详情请参阅 [Bedrock Document](https://docs.aws.amazon.com/bedrock/latest/userguide/claude-messages-extended-thinking.html)。
 - 当思考模式开启时，`temperature` 和 `top_p` **不会**被转发。Anthropic 明确说明 `temperature` 和 `top_k` 与思考模式不兼容，而 `top_p` 仅在 0.95 到 1 之间有效，因此本代理会直接丢弃这两个参数，而不是让 Bedrock 拒绝该请求。详见 [Extended thinking - sampling parameters](https://platform.claude.com/docs/en/build-with-claude/thinking)。在思考请求中，你为它们设置的任何值都会被忽略。
 - Deepseek R1 会自动使用推理模式，不需要在中传递额外的 reasoning_effort 参数（否则会报错）
 - 推理结果（思维链结果、思考过程）被添加到名为 'reasoning_content' 的额外标签中，这不是 OpenAI 官方支持的格式。此设计遵循 [Deepseek Reasoning Model](https://api-docs.deepseek.com/guides/reasoning_model#api-example)  的规范。未来可能会有所变动。
@@ -554,6 +556,8 @@ curl $OPENAI_BASE_URL/chat/completions \
 
 > **未经验证**：`thinking.type: "adaptive"` 和 `output_config.effort` 是 Anthropic 为其 **Messages API** 所记录的字段名。我们未能找到 AWS 官方对这些字段在 Converse API 的 `additionalModelRequestFields` 中如何命名的说明，也没有发起真实的 Bedrock 调用来确认，因此请把上面的 payload 当作模板而非已验证的约定。如果 Bedrock 返回关于未知字段的 `ValidationException`，请查阅最新的 [Bedrock inference request parameters](https://docs.aws.amazon.com/bedrock/latest/userguide/model-parameters-anthropic-claude-messages.html) 以确认正确的字段名并调整 `extra_body` —— 无论如何都不需要修改本代理。
 
+> **注意**：只要 `extra_body` 中包含 `thinking`、`reasoning_config`、`output_config` 或 `effort`，请求中的 `temperature` 和 `top_p` 就会被丢弃，因为在这些写法下思考模式都是开启的，而 Anthropic 明确说明这两个参数与思考模式不兼容。只传 `effort` 的请求与显式传入 thinking 块的请求处理方式相同。
+
 请注意 `reasoning_effort` 和 `extra_body` 是两条不同的路径：`reasoning_effort` 会让代理替你计算 `budget_tokens`（手动扩展思考），而 `extra_body` 则把你的字段原样交给 Bedrock。请二者择一，不要同时使用。
 
 ## Interleaved thinking (beta)
@@ -566,7 +570,7 @@ Claude 4 模型支持借助工具使用的扩展思维功能（Extended Thinking
 
 **支持的模型**: 支持扩展思考的 Claude 模型。在本代理可访问的模型中，即 Claude Opus 4.5 和 Claude Haiku 4.5，以及 Claude Opus 4.6 和 Claude Sonnet 4.6（在后两者上扩展思考仍然可用但已被弃用 —— 建议改用[自适应思考](#自适应思考与-effort-参数)）。
 
-> **注意**：只要 `extra_body` 中包含 `thinking` 字段，请求中的 `temperature` 和 `top_p` 就会被丢弃，因为 Anthropic 明确说明它们与思考模式不兼容。
+> **注意**：只要 `extra_body` 中包含 thinking 或 effort 相关字段（`thinking`、`reasoning_config`、`output_config` 或 `effort`），请求中的 `temperature` 和 `top_p` 就会被丢弃，因为 Anthropic 明确说明它们与思考模式不兼容。
 
 **Request 示例**
 

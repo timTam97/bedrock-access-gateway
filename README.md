@@ -8,6 +8,8 @@ This project now supports the current Anthropic lineup on Amazon Bedrock Convers
 
 Cross-region inference profiles are now discovered from the region's own `ListInferenceProfiles` response instead of a single guessed prefix, so the **JP** (`jp.`) and **AU** (`au.`) profiles are picked up alongside `us.`, `eu.`, `apac.` and `global.` wherever AWS offers them.
 
+> **Upgrading:** the built-in default model changed from the long-retired `anthropic.claude-3-sonnet-20240229-v1:0` to `global.anthropic.claude-haiku-4-5-20251001-v1:0`. Deployments that never set `DEFAULT_MODEL`, and CloudFormation stacks that left **DefaultModelId** at its default, will start serving Claude Haiku 4.5 after the next update - a different model with different output characteristics and pricing. Set `DEFAULT_MODEL` (or **DefaultModelId**) explicitly to pin a model of your choice, and make sure you have access to it in your region. Note that the new default is a `global.` inference profile ID, so it needs `ENABLE_CROSS_REGION_INFERENCE` left at `true`; see [Cross-region inference profile discovery](./docs/Usage.md#cross-region-inference-profile-discovery).
+
 It also supports reasoning (extended thinking) and **DeepSeek R1**. Check [How to Use](./docs/Usage.md#reasoning) for more details. You need to first run the Models API to refresh the model list.
 
 ## Overview

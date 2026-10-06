@@ -83,15 +83,40 @@ bedrock_client = boto3.client(
 # or Haiku 4.5. See "Limits and feature compatibility" > "Sampling parameters" in
 # https://platform.claude.com/docs/en/build-with-claude/thinking
 # Dropping topP rather than temperature keeps the parameter OpenAI clients actually
-# set. These are id fragments, not full ids, so a bare model id, a cross-region
-# inference profile id (us./eu./apac./jp./au./global. prefixed) and an application
-# inference profile ARN all match.
+# set, and it is documented in docs/Usage.md so callers know their top_p is ignored.
+# These are id fragments, not full ids, so a bare model id and a cross-region
+# inference profile id (us./eu./apac./jp./au./global. prefixed) both match. An
+# application inference profile ARN does NOT match: it ends in an opaque profile id
+# (".../application-inference-profile/abcdef123456") and never carries the model
+# name, so requests routed through one keep their topP. Closing that gap would need
+# an extra GetInferenceProfile call per request to resolve the target model, which
+# is out of scope here.
 CLAUDE_MODELS_WITHOUT_TOP_P = (
     "claude-sonnet-4-5",
     "claude-opus-4-5",
     "claude-haiku-4-5",
     "claude-sonnet-4-6",
     "claude-opus-4-6",
+)
+
+# extra_body keys that mean the request is steering Claude's thinking, and therefore
+# that temperature and topP have to be dropped from inferenceConfig. "thinking" and
+# "reasoning_config" cover manual extended thinking; "output_config" and "effort"
+# cover adaptive thinking, which Anthropic steers with a top-level
+# output_config.effort level instead of a thinking block, and which is on by default
+# on Claude Opus 4.6 and Claude Sonnet 4.6. The sampling restriction applies "while
+# thinking is on" regardless of how thinking was turned on, so an effort-only request
+# needs the same treatment as an explicit thinking block.
+# https://platform.claude.com/docs/en/build-with-claude/thinking
+# https://platform.claude.com/docs/en/build-with-claude/effort
+# Unverified against a live Converse call: these are the Messages API field names, as
+# noted in docs/Usage.md. Matching a key the model ignores only costs the request its
+# sampling parameters, which is the safer side of the trade.
+THINKING_EXTRA_BODY_KEYS = (
+    "thinking",
+    "reasoning_config",
+    "output_config",
+    "effort",
 )
 
 # Bedrock rejects a smaller reasoning budget with a ValidationException. It may
@@ -103,6 +128,16 @@ def requires_top_p_removal(model_id: str) -> bool:
     """Whether topP must be dropped for this model. See CLAUDE_MODELS_WITHOUT_TOP_P."""
     lowered = model_id.lower()
     return any(fragment in lowered for fragment in CLAUDE_MODELS_WITHOUT_TOP_P)
+
+
+def enables_thinking(extra_body: dict) -> bool:
+    """Whether an extra_body payload turns thinking on. See THINKING_EXTRA_BODY_KEYS."""
+    return any(key in extra_body for key in THINKING_EXTRA_BODY_KEYS)
+
+
+def reasoning_max_tokens_error(max_tokens: int) -> str:
+    """Message for a reasoning request whose output window cannot fit the budget."""
+    return f"max_tokens must be greater than {MIN_REASONING_BUDGET_TOKENS} when reasoning is enabled, got {max_tokens}"
 
 
 SUPPORTED_BEDROCK_EMBEDDING_MODELS = {
@@ -231,6 +266,17 @@ class BedrockModel(BaseChatModel):
         if chat_request.model not in bedrock_model_list.keys():
             error = f"Unsupported model {chat_request.model}, please use models API to get a list of supported models"
             logger.error("Unsupported model: %s", chat_request.model)
+
+        # A reasoning request needs an output window big enough for the minimum
+        # thinking budget plus an answer. _calc_budget_tokens() rejects it too, but
+        # that runs inside the response generator, which on a streaming request is
+        # after the 200 and the SSE content type have been sent - so the error would
+        # reach the client as an in-stream event instead of an HTTP 400. validate()
+        # is called by the router before streaming starts, so check it here as well.
+        if not error and chat_request.reasoning_effort:
+            max_tokens = chat_request.max_completion_tokens or chat_request.max_tokens
+            if max_tokens is not None and max_tokens <= MIN_REASONING_BUDGET_TOKENS:
+                error = reasoning_max_tokens_error(max_tokens)
 
         if error:
             raise HTTPException(
@@ -624,10 +670,11 @@ class BedrockModel(BaseChatModel):
         if chat_request.extra_body:
             # reasoning_config will not be used
             args["additionalModelRequestFields"] = chat_request.extra_body
-            # Extended thinking supports neither temperature nor topP
-            # Remove both to avoid validation errors
+            # Thinking supports neither temperature nor topP, whether it was turned
+            # on with a thinking block or with an adaptive-thinking effort level.
+            # Remove both to avoid validation errors. See THINKING_EXTRA_BODY_KEYS.
             # https://platform.claude.com/docs/en/build-with-claude/thinking
-            if "thinking" in chat_request.extra_body:
+            if enables_thinking(chat_request.extra_body):
                 inference_config.pop("temperature", None)
                 inference_config.pop("topP", None)
         return args
@@ -904,14 +951,12 @@ class BedrockModel(BaseChatModel):
         # fall below the minimum Bedrock accepts (the default max_tokens of 2048 with
         # effort "low" gives 614, which Bedrock rejects).
         # budget_tokens must also stay below maxTokens, so a max_tokens at or below
-        # the minimum cannot be satisfied at all.
+        # the minimum cannot be satisfied at all. validate() rejects this earlier for
+        # requests that go through the router; this is the backstop.
         if max_tokens <= MIN_REASONING_BUDGET_TOKENS:
             raise HTTPException(
                 status_code=400,
-                detail=(
-                    f"max_tokens must be greater than {MIN_REASONING_BUDGET_TOKENS} "
-                    f"when reasoning is enabled, got {max_tokens}"
-                ),
+                detail=reasoning_max_tokens_error(max_tokens),
             )
 
         if reasoning_effort == "low":
@@ -920,7 +965,23 @@ class BedrockModel(BaseChatModel):
             budget_tokens = int(max_tokens * 0.6)
         else:
             budget_tokens = max_tokens - 1
-        return max(budget_tokens, MIN_REASONING_BUDGET_TOKENS)
+
+        if budget_tokens < MIN_REASONING_BUDGET_TOKENS:
+            # The clamp takes a disproportionate share of a small output window: with
+            # max_tokens=1500 and effort "low" the budget becomes 1024 and only 476
+            # tokens are left for the answer, which may come back truncated. Warn
+            # rather than fail - the request is still valid for Bedrock.
+            logger.warning(
+                "Raising reasoning budget_tokens from %d to the Bedrock minimum %d; "
+                "only %d of max_tokens=%d is left for the answer, which may be truncated. "
+                "Use a larger max_tokens (Anthropic recommends a budget of at least 4000).",
+                budget_tokens,
+                MIN_REASONING_BUDGET_TOKENS,
+                max_tokens - MIN_REASONING_BUDGET_TOKENS,
+                max_tokens,
+            )
+            budget_tokens = MIN_REASONING_BUDGET_TOKENS
+        return budget_tokens
 
     def _convert_finish_reason(self, finish_reason: str | None) -> str | None:
         """

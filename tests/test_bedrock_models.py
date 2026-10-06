@@ -16,6 +16,7 @@ from api.models import bedrock
 OPUS_4_6 = "anthropic.claude-opus-4-6-v1"
 OPUS_4_5 = "anthropic.claude-opus-4-5-20251101-v1:0"
 SONNET_4_6 = "anthropic.claude-sonnet-4-6"
+SONNET_4_5 = "anthropic.claude-sonnet-4-5-20250929-v1:0"
 HAIKU_4_5 = "anthropic.claude-haiku-4-5-20251001-v1:0"
 OPUS_4_1 = "anthropic.claude-opus-4-1-20250805-v1:0"
 HAIKU_3_5 = "anthropic.claude-3-5-haiku-20241022-v1:0"
@@ -40,6 +41,8 @@ SYSTEM_DEFINED_PROFILE_IDS = [
     "global." + SONNET_4_6,
     # A profile for a model that is not in the foundation model list at all.
     "us." + OPUS_4_5,
+    # Sonnet 4.5 is deprecated and reported with a LEGACY lifecycle status here.
+    "global." + SONNET_4_5,
     # Profiles for models excluded by the streaming / lifecycle filters.
     "us." + OPUS_4_1,
     "us." + HAIKU_3_5,
@@ -78,6 +81,14 @@ FOUNDATION_MODELS = [
         "inputModalities": ["TEXT"],
         "responseStreamingSupported": False,
         "modelLifecycle": {"status": "ACTIVE"},
+    },
+    {
+        # Kept: LEGACY is still a serviceable lifecycle status.
+        "modelId": SONNET_4_5,
+        "inferenceTypesSupported": ["ON_DEMAND"],
+        "inputModalities": ["TEXT", "IMAGE"],
+        "responseStreamingSupported": True,
+        "modelLifecycle": {"status": "LEGACY"},
     },
     {
         # Excluded entirely: lifecycle status outside ACTIVE / LEGACY.
@@ -205,6 +216,14 @@ def test_on_demand_model_is_listed_under_its_bare_id(monkeypatch):
     model_list = discover(monkeypatch)
 
     assert model_list[HAIKU_4_5] == {"modalities": ["TEXT", "IMAGE"]}
+
+
+def test_legacy_lifecycle_models_are_still_listed(monkeypatch):
+    """LEGACY is serviceable, unlike EOL - a deprecated model must stay callable."""
+    model_list = discover(monkeypatch)
+
+    assert SONNET_4_5 in model_list
+    assert "global." + SONNET_4_5 in model_list
 
 
 def test_non_streaming_and_eol_models_are_excluded_entirely(monkeypatch):
