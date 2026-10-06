@@ -35,7 +35,7 @@ Source: Anthropic's [Claude on Amazon Bedrock (legacy integration)](https://plat
 
 A prefix column above only tells you the profile *can* exist. The [Models API](#models-api) is the authoritative list for the region you actually deployed into - run it and use an ID it returns. See also AWS's [Supported Regions and models for inference profiles](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html).
 
-> **`top_p` is not forwarded to this generation.** Bedrock Converse rejects `temperature` and `topP` together on these models, so the proxy drops `top_p` from **every** request whose model ID contains `claude-sonnet-4-5`, `claude-opus-4-5`, `claude-haiku-4-5`, `claude-sonnet-4-6` or `claude-opus-4-6` - thinking or not. Dropping `top_p` rather than `temperature` keeps the parameter OpenAI clients actually set. The rejection was observed on Claude Sonnet 4.5 and is applied conservatively to the rest of the generation; Anthropic publishes the restriction only for [thinking requests](https://platform.claude.com/docs/en/build-with-claude/thinking). If you need `top_p`, use a model outside this list. One exception: a request addressed to an **application inference profile ARN** still carries `top_p`, because the ARN ends in an opaque profile ID and never names the model, so the proxy cannot tell which model it points at.
+> **`top_p` is not forwarded to this generation.** Bedrock Converse was observed rejecting `temperature` and `topP` together on **Claude Sonnet 4.5** only; Anthropic publishes the restriction only for [thinking requests](https://platform.claude.com/docs/en/build-with-claude/thinking) and documents no unconditional one for the rest of the generation. The proxy still applies the workaround conservatively across the family, dropping `top_p` from **every** request whose model ID contains `claude-sonnet-4-5`, `claude-opus-4-5`, `claude-haiku-4-5`, `claude-sonnet-4-6` or `claude-opus-4-6` - thinking or not. Dropping `top_p` rather than `temperature` keeps the parameter OpenAI clients actually set. If you need `top_p`, use a model outside this list. One exception: a request addressed to an **application inference profile ARN** still carries `top_p`, because the ARN ends in an opaque profile ID and never names the model, so the proxy cannot tell which model it points at.
 
 ### Cross-region inference profile discovery
 
@@ -534,6 +534,8 @@ for chunk in response:
 
 On **Claude Opus 4.6** and **Claude Sonnet 4.6**, manual extended thinking (`thinking.type: "enabled"` with an explicit `budget_tokens`) is deprecated. Those models use *adaptive* thinking instead: Claude decides when and how deeply to think, and you steer it with an `effort` level (`low`, `medium`, `high`, `max`) rather than a token budget. Anthropic documents adaptive thinking as the supported mode for both models and lists `effort` support on Claude Opus 4.5, Claude Opus 4.6 and Claude Sonnet 4.6. See [Extended thinking](https://platform.claude.com/docs/en/build-with-claude/thinking) and [Effort](https://platform.claude.com/docs/en/build-with-claude/effort).
 
+Thinking is **off** on both models until you send a thinking block: Anthropic's per-model configuration table reads *Thinking off* for a request with no thinking field, and says thinking stays off "until you set `thinking: {type: "adaptive"}`". An `effort` level on its own does not turn thinking on - effort applies to every output token and "works whether or not thinking is enabled". So send `thinking` to get thinking, and use `effort` to steer how much of it you get.
+
 This proxy needs no new parameter for either: anything you put in `extra_body` is forwarded verbatim as the Bedrock Converse `additionalModelRequestFields`, so you can pass the model's own thinking and effort fields straight through.
 
 ```bash
@@ -558,7 +560,7 @@ curl $OPENAI_BASE_URL/chat/completions \
 
 > **Unverified:** `thinking.type: "adaptive"` and `output_config.effort` are the field names Anthropic documents for its **Messages API**. We could not find an AWS-published statement of how those fields are named inside the Converse API's `additionalModelRequestFields`, and no live Bedrock call was made to confirm it, so treat the payload above as a template rather than a verified contract. If Bedrock rejects it with a `ValidationException` about an unexpected field, check the current [Bedrock inference request parameters](https://docs.aws.amazon.com/bedrock/latest/userguide/model-parameters-anthropic-claude-messages.html) for the accepted spelling and adjust `extra_body` - no change to this proxy is needed either way.
 
-> **Note:** `temperature` and `top_p` are dropped from any request whose `extra_body` carries `thinking`, `reasoning_config`, `output_config` or `effort`, because thinking is on in all of those shapes and Anthropic documents both parameters as incompatible with thinking. An `effort`-only request is treated the same way as an explicit thinking block.
+> **Note:** `temperature` and `top_p` are dropped from any request whose `extra_body` carries a `thinking` block (adaptive or manual) or a `reasoning_config`, because Anthropic documents both parameters as incompatible with thinking. They are **not** dropped for an `extra_body` that only carries `output_config`: neither an `output_config.effort` level nor an `output_config.format` [structured-output](https://platform.claude.com/docs/en/build-with-claude/structured-outputs) schema turns thinking on, so those requests keep the sampling parameters you set. `top_p` is still dropped for the Claude 4.5/4.6 generation by the model-family rule in [Supported Anthropic models](#supported-anthropic-models), whatever `extra_body` contains.
 
 Note that `reasoning_effort` and `extra_body` are different paths: `reasoning_effort` makes the proxy compute a `budget_tokens` value for you (manual extended thinking), while `extra_body` hands your fields to Bedrock untouched. Use one or the other, not both.
 
@@ -571,7 +573,7 @@ With interleaved thinking, the `budget_tokens` can exceed the `max_tokens` param
 
 **Supported Models**: the Claude models that offer extended thinking. Of the models reachable through this proxy that is Claude Opus 4.5 and Claude Haiku 4.5, plus Claude Opus 4.6 and Claude Sonnet 4.6 where extended thinking still works but is deprecated - prefer [adaptive thinking](#adaptive-thinking-and-the-effort-parameter) on those two.
 
-> **Note:** `temperature` and `top_p` are dropped from the request whenever `extra_body` contains a thinking or effort field (`thinking`, `reasoning_config`, `output_config` or `effort`), because Anthropic documents them as incompatible with thinking.
+> **Note:** `temperature` and `top_p` are dropped from the request whenever `extra_body` contains a `thinking` block or a `reasoning_config`, because Anthropic documents them as incompatible with thinking.
 
 **Example Request**
 

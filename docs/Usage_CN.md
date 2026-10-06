@@ -36,7 +36,7 @@ AWS 通过**跨区域推理配置文件（cross-region inference profile）**而
 
 上表中的前缀列只说明该配置文件*可能*存在。[Models API](#models-api) 才是你实际部署区域的权威列表 —— 请先运行它，并使用它返回的 ID。另请参阅 AWS 的 [Supported Regions and models for inference profiles](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html)。
 
-> **这一代模型不会转发 `top_p`。** Bedrock Converse 在这些模型上不接受同时传入 `temperature` 和 `topP`，因此只要模型 ID 中包含 `claude-sonnet-4-5`、`claude-opus-4-5`、`claude-haiku-4-5`、`claude-sonnet-4-6` 或 `claude-opus-4-6`，本代理就会从**每一个**请求中丢弃 `top_p` —— 无论是否开启思考模式。丢弃 `top_p` 而保留 `temperature`，是因为后者才是 OpenAI 客户端真正会设置的参数。该限制最初是在 Claude Sonnet 4.5 上观察到的，这里保守地推广到了整代模型；Anthropic 官方只针对[思考请求](https://platform.claude.com/docs/en/build-with-claude/thinking)说明了这一限制。如果你确实需要 `top_p`，请改用该列表之外的模型。有一个例外：发往**应用推理配置文件 ARN**（application inference profile ARN）的请求仍会携带 `top_p`，因为该 ARN 以不透明的配置文件 ID 结尾、不含模型名称，代理无法判断它指向哪个模型。
+> **这一代模型不会转发 `top_p`。** Bedrock Converse 不接受同时传入 `temperature` 和 `topP` 这一现象，**只**在 Claude Sonnet 4.5 上被观察到；Anthropic 官方只针对[思考请求](https://platform.claude.com/docs/en/build-with-claude/thinking)说明了该限制，并未说明整代模型存在无条件的限制。本代理仍然保守地把这个规避措施推广到整代模型：只要模型 ID 中包含 `claude-sonnet-4-5`、`claude-opus-4-5`、`claude-haiku-4-5`、`claude-sonnet-4-6` 或 `claude-opus-4-6`，就会从**每一个**请求中丢弃 `top_p` —— 无论是否开启思考模式。丢弃 `top_p` 而保留 `temperature`，是因为后者才是 OpenAI 客户端真正会设置的参数。如果你确实需要 `top_p`，请改用该列表之外的模型。有一个例外：发往**应用推理配置文件 ARN**（application inference profile ARN）的请求仍会携带 `top_p`，因为该 ARN 以不透明的配置文件 ID 结尾、不含模型名称，代理无法判断它指向哪个模型。
 
 ### 跨区域推理配置文件的发现机制
 
@@ -532,6 +532,8 @@ for chunk in response:
 
 在 **Claude Opus 4.6** 和 **Claude Sonnet 4.6** 上，手动扩展思考（`thinking.type: "enabled"` 配合显式的 `budget_tokens`）已被弃用。这两个模型改用*自适应*思考：由 Claude 自行决定何时思考以及思考多深，而你通过 `effort` 等级（`low`、`medium`、`high`、`max`）来引导它，而不是指定 token 预算。Anthropic 将自适应思考列为这两个模型的受支持模式，并说明 Claude Opus 4.5、Claude Opus 4.6 和 Claude Sonnet 4.6 支持 `effort`。详见 [Extended thinking](https://platform.claude.com/docs/en/build-with-claude/thinking) 和 [Effort](https://platform.claude.com/docs/en/build-with-claude/effort)。
 
+在这两个模型上，只要你不传 thinking 块，思考模式就是**关闭**的：Anthropic 的逐模型配置表中，请求不含 thinking 字段时显示为 *Thinking off*，并说明思考会一直关闭，"直到你设置 `thinking: {type: "adaptive"}`"。单独传 `effort` **不会**开启思考模式 —— effort 作用于全部输出 token，"无论是否开启思考模式都有效"。因此：用 `thinking` 来开启思考，用 `effort` 来控制思考的多少。
+
 这两种模式都不需要本代理新增任何参数：你放在 `extra_body` 中的内容会原样作为 Bedrock Converse 的 `additionalModelRequestFields` 转发，因此可以直接把模型自身的 thinking 和 effort 字段传下去。
 
 ```bash
@@ -556,7 +558,7 @@ curl $OPENAI_BASE_URL/chat/completions \
 
 > **未经验证**：`thinking.type: "adaptive"` 和 `output_config.effort` 是 Anthropic 为其 **Messages API** 所记录的字段名。我们未能找到 AWS 官方对这些字段在 Converse API 的 `additionalModelRequestFields` 中如何命名的说明，也没有发起真实的 Bedrock 调用来确认，因此请把上面的 payload 当作模板而非已验证的约定。如果 Bedrock 返回关于未知字段的 `ValidationException`，请查阅最新的 [Bedrock inference request parameters](https://docs.aws.amazon.com/bedrock/latest/userguide/model-parameters-anthropic-claude-messages.html) 以确认正确的字段名并调整 `extra_body` —— 无论如何都不需要修改本代理。
 
-> **注意**：只要 `extra_body` 中包含 `thinking`、`reasoning_config`、`output_config` 或 `effort`，请求中的 `temperature` 和 `top_p` 就会被丢弃，因为在这些写法下思考模式都是开启的，而 Anthropic 明确说明这两个参数与思考模式不兼容。只传 `effort` 的请求与显式传入 thinking 块的请求处理方式相同。
+> **注意**：只要 `extra_body` 中包含 `thinking` 块（自适应或手动写法）或 `reasoning_config`，请求中的 `temperature` 和 `top_p` 就会被丢弃，因为 Anthropic 明确说明这两个参数与思考模式不兼容。但如果 `extra_body` 中**只有** `output_config`，这两个参数**不会**被丢弃：无论是 `output_config.effort` 等级，还是 `output_config.format` 的[结构化输出](https://platform.claude.com/docs/en/build-with-claude/structured-outputs) schema，都不会开启思考模式，因此这类请求会保留你设置的采样参数。需要注意的是，对 Claude 4.5/4.6 这一代模型，无论 `extra_body` 内容如何，`top_p` 仍会被[支持的 Anthropic 模型](#支持的-anthropic-模型)一节所述的模型系列规则丢弃。
 
 请注意 `reasoning_effort` 和 `extra_body` 是两条不同的路径：`reasoning_effort` 会让代理替你计算 `budget_tokens`（手动扩展思考），而 `extra_body` 则把你的字段原样交给 Bedrock。请二者择一，不要同时使用。
 
@@ -570,7 +572,7 @@ Claude 4 模型支持借助工具使用的扩展思维功能（Extended Thinking
 
 **支持的模型**: 支持扩展思考的 Claude 模型。在本代理可访问的模型中，即 Claude Opus 4.5 和 Claude Haiku 4.5，以及 Claude Opus 4.6 和 Claude Sonnet 4.6（在后两者上扩展思考仍然可用但已被弃用 —— 建议改用[自适应思考](#自适应思考与-effort-参数)）。
 
-> **注意**：只要 `extra_body` 中包含 thinking 或 effort 相关字段（`thinking`、`reasoning_config`、`output_config` 或 `effort`），请求中的 `temperature` 和 `top_p` 就会被丢弃，因为 Anthropic 明确说明它们与思考模式不兼容。
+> **注意**：只要 `extra_body` 中包含 `thinking` 块或 `reasoning_config`，请求中的 `temperature` 和 `top_p` 就会被丢弃，因为 Anthropic 明确说明它们与思考模式不兼容。
 
 **Request 示例**
 

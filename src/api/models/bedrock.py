@@ -99,24 +99,29 @@ CLAUDE_MODELS_WITHOUT_TOP_P = (
     "claude-opus-4-6",
 )
 
-# extra_body keys that mean the request is steering Claude's thinking, and therefore
-# that temperature and topP have to be dropped from inferenceConfig. "thinking" and
-# "reasoning_config" cover manual extended thinking; "output_config" and "effort"
-# cover adaptive thinking, which Anthropic steers with a top-level
-# output_config.effort level instead of a thinking block, and which is on by default
-# on Claude Opus 4.6 and Claude Sonnet 4.6. The sampling restriction applies "while
-# thinking is on" regardless of how thinking was turned on, so an effort-only request
-# needs the same treatment as an explicit thinking block.
+# extra_body keys that turn Claude's thinking on, and therefore mean temperature and
+# topP have to be dropped from inferenceConfig. "thinking" covers both spellings of
+# the thinking block - adaptive ({"type": "adaptive"}) and manual extended thinking
+# ({"type": "enabled", "budget_tokens": N}) - and "reasoning_config" is the spelling
+# the reasoning_effort path in this file sends.
+#
+# "output_config" and "effort" are deliberately NOT listed. Anthropic's per-model
+# configuration table reads "Thinking off" for Claude Opus 4.6 and Claude Sonnet 4.6
+# when no thinking field is sent ("thinking is off until you set
+# thinking: {type: 'adaptive'}"), and the effort page states that because effort
+# applies to every output token "it works whether or not thinking is enabled". An
+# effort-only request therefore is not a thinking request and keeps its temperature.
+# output_config is also the structured-outputs container (output_config.format), so
+# matching it would scrub the sampling parameters of every JSON-schema request -
+# requests that demonstrably have thinking off.
 # https://platform.claude.com/docs/en/build-with-claude/thinking
 # https://platform.claude.com/docs/en/build-with-claude/effort
-# Unverified against a live Converse call: these are the Messages API field names, as
-# noted in docs/Usage.md. Matching a key the model ignores only costs the request its
-# sampling parameters, which is the safer side of the trade.
+# https://platform.claude.com/docs/en/build-with-claude/structured-outputs
+# Unverified against a live Converse call (no credentials available here): these are
+# the Messages API field names, as noted in docs/Usage.md.
 THINKING_EXTRA_BODY_KEYS = (
     "thinking",
     "reasoning_config",
-    "output_config",
-    "effort",
 )
 
 # Bedrock rejects a smaller reasoning budget with a ValidationException. It may
@@ -670,9 +675,11 @@ class BedrockModel(BaseChatModel):
         if chat_request.extra_body:
             # reasoning_config will not be used
             args["additionalModelRequestFields"] = chat_request.extra_body
-            # Thinking supports neither temperature nor topP, whether it was turned
-            # on with a thinking block or with an adaptive-thinking effort level.
-            # Remove both to avoid validation errors. See THINKING_EXTRA_BODY_KEYS.
+            # Thinking supports neither temperature nor topP, in either the adaptive
+            # or the manual spelling of the thinking block. Remove both to avoid
+            # validation errors. An extra_body that only carries an effort level or a
+            # structured-output schema is not a thinking request and keeps them. See
+            # THINKING_EXTRA_BODY_KEYS.
             # https://platform.claude.com/docs/en/build-with-claude/thinking
             if enables_thinking(chat_request.extra_body):
                 inference_config.pop("temperature", None)

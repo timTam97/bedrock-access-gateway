@@ -81,10 +81,24 @@ def test_thinking_in_extra_body_drops_temperature_and_top_p(model):
     assert args["additionalModelRequestFields"] == extra_body
 
 
-def test_extra_body_unrelated_to_thinking_leaves_sampling_parameters_alone(model):
-    # A beta header passthrough says nothing about thinking, so nothing is dropped.
-    extra_body = {"anthropic_beta": ["interleaved-thinking-2025-05-14"]}
-
+@pytest.mark.parametrize(
+    "extra_body",
+    [
+        # A beta header passthrough says nothing about thinking.
+        {"anthropic_beta": ["interleaved-thinking-2025-05-14"]},
+        # Structured outputs. output_config.format is the JSON-schema container, and
+        # it is available on the legacy Bedrock integration this proxy calls, so this
+        # is a shape real callers send. Thinking is off in it.
+        # https://platform.claude.com/docs/en/build-with-claude/structured-outputs
+        {"output_config": {"format": {"type": "json_schema", "schema": {"type": "object"}}}},
+        # An effort level on its own does not turn thinking on: Anthropic's per-model
+        # table reads "Thinking off" for Opus 4.6 / Sonnet 4.6 with no thinking field,
+        # and effort "works whether or not thinking is enabled".
+        # https://platform.claude.com/docs/en/build-with-claude/effort
+        {"output_config": {"effort": "medium"}},
+    ],
+)
+def test_extra_body_unrelated_to_thinking_leaves_sampling_parameters_alone(model, extra_body):
     args = parse(model, model=OUT_OF_FAMILY_MODEL_ID, extra_body=extra_body)
 
     assert args["inferenceConfig"]["temperature"] == 1.0
@@ -92,19 +106,32 @@ def test_extra_body_unrelated_to_thinking_leaves_sampling_parameters_alone(model
     assert args["additionalModelRequestFields"] == extra_body
 
 
+def test_structured_output_on_an_in_family_model_keeps_temperature(model):
+    # The same discrimination on a model whose topP is dropped unconditionally: the
+    # JSON-schema request must still keep temperature.
+    extra_body = {"output_config": {"format": {"type": "json_schema", "schema": {"type": "object"}}}}
+
+    args = parse(model, model="global.anthropic.claude-opus-4-6-v1", extra_body=extra_body)
+
+    assert args["inferenceConfig"]["temperature"] == 1.0
+    assert "topP" not in args["inferenceConfig"]
+    assert args["additionalModelRequestFields"] == extra_body
+
+
 @pytest.mark.parametrize(
     "extra_body",
     [
+        # Adaptive thinking on Opus 4.6 / Sonnet 4.6: a thinking block with no budget.
         {"thinking": {"type": "adaptive"}},
-        {"output_config": {"effort": "medium"}},
-        {"effort": "medium"},
+        # Adaptive thinking steered by an effort level still carries the thinking block.
+        {"thinking": {"type": "adaptive"}, "output_config": {"effort": "medium"}},
+        # The spelling this file's own reasoning_effort path sends.
         {"reasoning_config": {"type": "enabled", "budget_tokens": 2048}},
     ],
 )
-def test_adaptive_thinking_extra_body_drops_temperature_and_top_p(model, extra_body):
-    # Adaptive thinking on Opus 4.6 / Sonnet 4.6 is steered by an effort level rather
-    # than a thinking block, and thinking is on either way, so temperature and topP
-    # have to go. See THINKING_EXTRA_BODY_KEYS.
+def test_thinking_shapes_in_extra_body_drop_temperature_and_top_p(model, extra_body):
+    # temperature and topP are incompatible with thinking however the thinking block
+    # is spelled. See THINKING_EXTRA_BODY_KEYS.
     args = parse(model, model="global.anthropic.claude-opus-4-6-v1", extra_body=extra_body)
 
     assert "temperature" not in args["inferenceConfig"]

@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# The job only needs to read the code it tests. Declared explicitly so the
+# GITHUB_TOKEN does not inherit a read-write repository default.
+permissions:
+  contents: read
+
 jobs:
   pytest:
     runs-on: ubuntu-latest
