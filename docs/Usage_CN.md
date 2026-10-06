@@ -558,7 +558,7 @@ curl $OPENAI_BASE_URL/chat/completions \
 
 > **未经验证**：`thinking.type: "adaptive"` 和 `output_config.effort` 是 Anthropic 为其 **Messages API** 所记录的字段名。我们未能找到 AWS 官方对这些字段在 Converse API 的 `additionalModelRequestFields` 中如何命名的说明，也没有发起真实的 Bedrock 调用来确认，因此请把上面的 payload 当作模板而非已验证的约定。如果 Bedrock 返回关于未知字段的 `ValidationException`，请查阅最新的 [Bedrock inference request parameters](https://docs.aws.amazon.com/bedrock/latest/userguide/model-parameters-anthropic-claude-messages.html) 以确认正确的字段名并调整 `extra_body` —— 无论如何都不需要修改本代理。
 
-> **注意**：只要 `extra_body` 中包含 `thinking` 块（自适应或手动写法）或 `reasoning_config`，请求中的 `temperature` 和 `top_p` 就会被丢弃，因为 Anthropic 明确说明这两个参数与思考模式不兼容。但如果 `extra_body` 中**只有** `output_config`，这两个参数**不会**被丢弃：无论是 `output_config.effort` 等级，还是 `output_config.format` 的[结构化输出](https://platform.claude.com/docs/en/build-with-claude/structured-outputs) schema，都不会开启思考模式，因此这类请求会保留你设置的采样参数。需要注意的是，对 Claude 4.5/4.6 这一代模型，无论 `extra_body` 内容如何，`top_p` 仍会被[支持的 Anthropic 模型](#支持的-anthropic-模型)一节所述的模型系列规则丢弃。
+> **注意**：只要 `extra_body` 中包含 `thinking` 块（自适应或手动写法）或 `reasoning_config`，请求中的 `temperature` 和 `top_p` 就会被丢弃，因为 Anthropic 明确说明这两个参数与思考模式不兼容。但显式**关闭**思考的写法 `"thinking": {"type": "disabled"}` 例外：Anthropic 的分模型配置表把它在这一代模型上都标为 *Thinking off*，因此这类请求不算思考请求，会保留这两个参数。同样，如果 `extra_body` 中**只有** `output_config`，这两个参数也**不会**被丢弃：无论是 `output_config.effort` 等级，还是 `output_config.format` 的[结构化输出](https://platform.claude.com/docs/en/build-with-claude/structured-outputs) schema，都不会开启思考模式，因此这类请求会保留你设置的采样参数。需要注意的是，对 Claude 4.5/4.6 这一代模型，无论 `extra_body` 内容如何，`top_p` 仍会被[支持的 Anthropic 模型](#支持的-anthropic-模型)一节所述的模型系列规则丢弃。
 
 请注意 `reasoning_effort` 和 `extra_body` 是两条不同的路径：`reasoning_effort` 会让代理替你计算 `budget_tokens`（手动扩展思考），而 `extra_body` 则把你的字段原样交给 Bedrock。请二者择一，不要同时使用。
 
@@ -572,7 +572,7 @@ Claude 4 模型支持借助工具使用的扩展思维功能（Extended Thinking
 
 **支持的模型**: 支持扩展思考的 Claude 模型。在本代理可访问的模型中，即 Claude Opus 4.5 和 Claude Haiku 4.5，以及 Claude Opus 4.6 和 Claude Sonnet 4.6（在后两者上扩展思考仍然可用但已被弃用 —— 建议改用[自适应思考](#自适应思考与-effort-参数)）。
 
-> **注意**：只要 `extra_body` 中包含 `thinking` 块或 `reasoning_config`，请求中的 `temperature` 和 `top_p` 就会被丢弃，因为 Anthropic 明确说明它们与思考模式不兼容。
+> **注意**：只要 `extra_body` 中包含 `thinking` 块或 `reasoning_config`，请求中的 `temperature` 和 `top_p` 就会被丢弃，因为 Anthropic 明确说明它们与思考模式不兼容。唯一的例外是 `"thinking": {"type": "disabled"}`：它会关闭思考模式，因此采样参数会被保留。
 
 **Request 示例**
 

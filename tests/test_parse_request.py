@@ -139,6 +139,30 @@ def test_thinking_shapes_in_extra_body_drop_temperature_and_top_p(model, extra_b
     assert args["additionalModelRequestFields"] == extra_body
 
 
+@pytest.mark.parametrize(
+    ("model_id", "expected_top_p"),
+    [
+        # Out of the 4.5/4.6 family, so nothing else drops topP either.
+        (OUT_OF_FAMILY_MODEL_ID, 1.0),
+        # In family: topP still goes, by the unconditional model-family rule.
+        ("global.anthropic.claude-opus-4-6-v1", None),
+    ],
+)
+def test_thinking_disabled_in_extra_body_keeps_temperature(model, model_id, expected_top_p):
+    # Anthropic's per-model configuration table reads "Thinking off" in its
+    # "disabled" column for every model family this proxy drops topP for, and the
+    # sampling restriction "applies only while thinking is on", so an explicit
+    # opt-out must keep the temperature the caller set.
+    # https://platform.claude.com/docs/en/build-with-claude/thinking
+    extra_body = {"thinking": {"type": "disabled"}}
+
+    args = parse(model, model=model_id, extra_body=extra_body)
+
+    assert args["inferenceConfig"]["temperature"] == 1.0
+    assert args["inferenceConfig"].get("topP") == expected_top_p
+    assert args["additionalModelRequestFields"] == extra_body
+
+
 def test_application_inference_profile_arn_keeps_top_p(model):
     # Known gap, recorded rather than silently assumed away: an application inference
     # profile ARN ends in an opaque profile id and never names the model, so the

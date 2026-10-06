@@ -124,6 +124,14 @@ THINKING_EXTRA_BODY_KEYS = (
     "reasoning_config",
 )
 
+# The one value of those keys that turns thinking OFF rather than on. The same
+# per-model configuration table reads "Thinking off" in its "disabled" column for
+# every family listed in CLAUDE_MODELS_WITHOUT_TOP_P (Claude Opus 4.6, Sonnet 4.6,
+# Opus 4.5, Sonnet 4.5 and Haiku 4.5), and the sampling restriction on those models
+# "applies only while thinking is on", so an explicit opt-out keeps temperature and
+# topP. https://platform.claude.com/docs/en/build-with-claude/thinking
+THINKING_DISABLED_TYPE = "disabled"
+
 # Bedrock rejects a smaller reasoning budget with a ValidationException. It may
 # change per model in the future.
 MIN_REASONING_BUDGET_TOKENS = 1024
@@ -137,7 +145,16 @@ def requires_top_p_removal(model_id: str) -> bool:
 
 def enables_thinking(extra_body: dict) -> bool:
     """Whether an extra_body payload turns thinking on. See THINKING_EXTRA_BODY_KEYS."""
-    return any(key in extra_body for key in THINKING_EXTRA_BODY_KEYS)
+    for key in THINKING_EXTRA_BODY_KEYS:
+        if key not in extra_body:
+            continue
+        value = extra_body[key]
+        # An explicit {"type": "disabled"} block asks for thinking off, so it is not
+        # a thinking request. See THINKING_DISABLED_TYPE.
+        if isinstance(value, dict) and value.get("type") == THINKING_DISABLED_TYPE:
+            continue
+        return True
+    return False
 
 
 def reasoning_max_tokens_error(max_tokens: int) -> str:
@@ -678,8 +695,9 @@ class BedrockModel(BaseChatModel):
             # Thinking supports neither temperature nor topP, in either the adaptive
             # or the manual spelling of the thinking block. Remove both to avoid
             # validation errors. An extra_body that only carries an effort level or a
-            # structured-output schema is not a thinking request and keeps them. See
-            # THINKING_EXTRA_BODY_KEYS.
+            # structured-output schema is not a thinking request and keeps them, and
+            # neither is one that turns thinking off with {"type": "disabled"}. See
+            # THINKING_EXTRA_BODY_KEYS and THINKING_DISABLED_TYPE.
             # https://platform.claude.com/docs/en/build-with-claude/thinking
             if enables_thinking(chat_request.extra_body):
                 inference_config.pop("temperature", None)
