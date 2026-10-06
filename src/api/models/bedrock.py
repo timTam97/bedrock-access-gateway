@@ -72,14 +72,38 @@ bedrock_client = boto3.client(
 )
 
 
-def get_inference_region_prefix():
-    if AWS_REGION.startswith("ap-"):
-        return "apac"
-    return AWS_REGION[:2]
+# Claude ids for which Bedrock Converse rejects temperature and topP together, so
+# topP is dropped. The restriction was first observed on Claude Sonnet 4.5 and is
+# applied here to the rest of the Converse-reachable Claude 4.5/4.6 generation.
+#
+# This is deliberately conservative. Anthropic documents the sampling-parameter
+# restriction for these models only while thinking is enabled - "temperature and
+# top_k are incompatible with thinking, and top_p is allowed at values between 0.95
+# and 1" - and publishes no unconditional restriction for Opus 4.5/4.6, Sonnet 4.6
+# or Haiku 4.5. See "Limits and feature compatibility" > "Sampling parameters" in
+# https://platform.claude.com/docs/en/build-with-claude/thinking
+# Dropping topP rather than temperature keeps the parameter OpenAI clients actually
+# set. These are id fragments, not full ids, so a bare model id, a cross-region
+# inference profile id (us./eu./apac./jp./au./global. prefixed) and an application
+# inference profile ARN all match.
+CLAUDE_MODELS_WITHOUT_TOP_P = (
+    "claude-sonnet-4-5",
+    "claude-opus-4-5",
+    "claude-haiku-4-5",
+    "claude-sonnet-4-6",
+    "claude-opus-4-6",
+)
+
+# Bedrock rejects a smaller reasoning budget with a ValidationException. It may
+# change per model in the future.
+MIN_REASONING_BUDGET_TOKENS = 1024
 
 
-# https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html
-cr_inference_prefix = get_inference_region_prefix()
+def requires_top_p_removal(model_id: str) -> bool:
+    """Whether topP must be dropped for this model. See CLAUDE_MODELS_WITHOUT_TOP_P."""
+    lowered = model_id.lower()
+    return any(fragment in lowered for fragment in CLAUDE_MODELS_WITHOUT_TOP_P)
+
 
 SUPPORTED_BEDROCK_EMBEDDING_MODELS = {
     "cohere.embed-multilingual-v3": "Cohere Embed Multilingual",
@@ -103,15 +127,30 @@ def list_bedrock_models() -> dict:
     """
     model_list = {}
     try:
-        profile_list = []
+        # Map foundation model_id -> list of system defined inference profile IDs
+        cr_profiles_by_model = defaultdict(list)
         # Map foundation model_id -> set of application inference profile ARNs
         app_profiles_by_model = defaultdict(set)
-        
+
         if ENABLE_CROSS_REGION_INFERENCE:
-            # List system defined inference profile IDs
-            paginator = bedrock_client.get_paginator('list_inference_profiles')
+            # List system defined inference profile IDs. A profile ID is a single
+            # region prefix token followed by the base model ID, for example
+            # "us.anthropic.claude-sonnet-4-5-20250929-v1:0". Index the IDs this
+            # Region actually returned by their base model ID instead of guessing a
+            # prefix, so every prefix on offer - us, eu, apac, jp, au, global and
+            # anything AWS adds later - is picked up without a code change. AWS
+            # documents that profile IDs must be discovered per source Region rather
+            # than inferred:
+            # https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html
+            paginator = bedrock_client.get_paginator("list_inference_profiles")
             for page in paginator.paginate(maxResults=1000, typeEquals="SYSTEM_DEFINED"):
-                profile_list.extend([p["inferenceProfileId"] for p in page["inferenceProfileSummaries"]])
+                for profile in page["inferenceProfileSummaries"]:
+                    profile_id = profile["inferenceProfileId"]
+                    # Split once: the prefix must be a single token with no dot in it.
+                    parts = profile_id.split(".", 1)
+                    if len(parts) != 2 or not parts[0] or not parts[1]:
+                        continue
+                    cr_profiles_by_model[parts[1]].append(profile_id)
 
         if ENABLE_APPLICATION_INFERENCE_PROFILES:
             # List application defined inference profile IDs and create mapping
@@ -153,15 +192,11 @@ def list_bedrock_models() -> dict:
             if "ON_DEMAND" in inference_types:
                 model_list[model_id] = {"modalities": input_modalities}
 
-            # Add cross-region inference model list.
-            profile_id = cr_inference_prefix + "." + model_id
-            if profile_id in profile_list:
+            # Add every cross-region inference profile discovered for this model.
+            # Newer Claude models are profile-only (no ON_DEMAND entitlement), so
+            # this is the only way they get listed at all.
+            for profile_id in cr_profiles_by_model.get(model_id, []):
                 model_list[profile_id] = {"modalities": input_modalities}
-
-            # Add global cross-region inference profiles
-            global_profile_id = "global." + model_id
-            if global_profile_id in profile_list:
-                model_list[global_profile_id] = {"modalities": input_modalities}
 
             # Add application inference profiles (emit all profiles for this model)
             if model_id in app_profiles_by_model:
@@ -528,9 +563,9 @@ class BedrockModel(BaseChatModel):
             "topP": chat_request.top_p,
         }
 
-        # Claude Sonnet 4.5 doesn't support both temperature and topP
-        # Remove topP for this model
-        if "claude-sonnet-4-5" in chat_request.model.lower():
+        # The Claude 4.5/4.6 generation doesn't support both temperature and topP
+        # Remove topP for these models
+        if requires_top_p_removal(chat_request.model):
             inference_config.pop("topP", None)
 
         if chat_request.stop is not None:
@@ -558,7 +593,9 @@ class BedrockModel(BaseChatModel):
                 max_tokens, chat_request.reasoning_effort
             )
             inference_config["maxTokens"] = max_tokens
-            # unset topP - Not supported
+            # unset temperature and topP - both are incompatible with thinking
+            # https://platform.claude.com/docs/en/build-with-claude/thinking
+            inference_config.pop("temperature", None)
             inference_config.pop("topP", None)
 
             args["additionalModelRequestFields"] = {
@@ -587,9 +624,11 @@ class BedrockModel(BaseChatModel):
         if chat_request.extra_body:
             # reasoning_config will not be used
             args["additionalModelRequestFields"] = chat_request.extra_body
-            # Extended thinking doesn't support both temperature and topP
-            # Remove topP to avoid validation error
+            # Extended thinking supports neither temperature nor topP
+            # Remove both to avoid validation errors
+            # https://platform.claude.com/docs/en/build-with-claude/thinking
             if "thinking" in chat_request.extra_body:
+                inference_config.pop("temperature", None)
                 inference_config.pop("topP", None)
         return args
 
@@ -861,14 +900,27 @@ class BedrockModel(BaseChatModel):
     ) -> int:
         # Helper function to calculate budget_tokens based on the max_tokens.
         # Ratio for efforts:  Low - 30%, medium - 60%, High: Max token - 1
-        # Note that The minimum budget_tokens is 1,024 tokens so far.
-        # But it may be changed for different models in the future.
+        # The result is clamped to MIN_REASONING_BUDGET_TOKENS: the ratios alone can
+        # fall below the minimum Bedrock accepts (the default max_tokens of 2048 with
+        # effort "low" gives 614, which Bedrock rejects).
+        # budget_tokens must also stay below maxTokens, so a max_tokens at or below
+        # the minimum cannot be satisfied at all.
+        if max_tokens <= MIN_REASONING_BUDGET_TOKENS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"max_tokens must be greater than {MIN_REASONING_BUDGET_TOKENS} "
+                    f"when reasoning is enabled, got {max_tokens}"
+                ),
+            )
+
         if reasoning_effort == "low":
-            return int(max_tokens * 0.3)
+            budget_tokens = int(max_tokens * 0.3)
         elif reasoning_effort == "medium":
-            return int(max_tokens * 0.6)
+            budget_tokens = int(max_tokens * 0.6)
         else:
-            return max_tokens - 1
+            budget_tokens = max_tokens - 1
+        return max(budget_tokens, MIN_REASONING_BUDGET_TOKENS)
 
     def _convert_finish_reason(self, finish_reason: str | None) -> str | None:
         """
