@@ -4,9 +4,11 @@ OpenAI-compatible RESTful APIs for Amazon Bedrock
 
 ## What's New 🔥
 
-This project now supports **Claude Sonnet 4.5**, Anthropic's most intelligent model with enhanced coding capabilities and complex agent support, available via global cross-region inference.
+This project now supports the current Anthropic lineup on Amazon Bedrock Converse - **Claude Opus 4.6**, **Claude Opus 4.5**, **Claude Sonnet 4.6** and **Claude Haiku 4.5**. See [Supported Anthropic models](./docs/Usage.md#supported-anthropic-models) for the model IDs and the cross-region inference prefixes each one accepts.
 
-It also supports reasoning for both **Claude 3.7 Sonnet** and **DeepSeek R1**. Check [How to Use](./docs/Usage.md#reasoning) for more details. You need to first run the Models API to refresh the model list.
+Cross-region inference profiles are now discovered from the region's own `ListInferenceProfiles` response instead of a single guessed prefix, so the **JP** (`jp.`) and **AU** (`au.`) profiles are picked up alongside `us.`, `eu.`, `apac.` and `global.` wherever AWS offers them.
+
+It also supports reasoning (extended thinking) and **DeepSeek R1**. Check [How to Use](./docs/Usage.md#reasoning) for more details. You need to first run the Models API to refresh the model list.
 
 ## Overview
 
@@ -135,7 +137,9 @@ If you encounter any issues, please check the [Troubleshooting Guide](./docs/Tro
 
 All you need is the API Key and the API Base URL. If you didn't set up your own key, then the default API Key (`bedrock`) will be used.
 
-Now, you can try out the proxy APIs. Let's say you want to test Claude 3 Sonnet model (model ID: `anthropic.claude-3-sonnet-20240229-v1:0`)...
+Now, you can try out the proxy APIs. Let's say you want to test the Claude Haiku 4.5 model (model ID: `global.anthropic.claude-haiku-4-5-20251001-v1:0`)...
+
+> **Note:** The current Claude models are served through inference profiles rather than on-demand throughput, so the model ID needs a prefix such as `global.` or `us.`. Run the [Models API](./docs/Usage.md#models-api) to see which IDs the current region actually offers.
 
 **Example API Usage**
 
@@ -152,7 +156,7 @@ curl $OPENAI_BASE_URL/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $OPENAI_API_KEY" \
   -d '{
-    "model": "anthropic.claude-3-sonnet-20240229-v1:0",
+    "model": "global.anthropic.claude-haiku-4-5-20251001-v1:0",
     "messages": [
       {
         "role": "user",
@@ -169,7 +173,7 @@ from openai import OpenAI
 
 client = OpenAI()
 completion = client.chat.completions.create(
-    model="anthropic.claude-3-sonnet-20240229-v1:0",
+    model="global.anthropic.claude-haiku-4-5-20251001-v1:0",
     messages=[{"role": "user", "content": "Hello!"}],
 )
 
@@ -236,7 +240,7 @@ from langchain.prompts import PromptTemplate
 from langchain_openai import ChatOpenAI
 
 chat = ChatOpenAI(
-    model="anthropic.claude-3-sonnet-20240229-v1:0",
+    model="global.anthropic.claude-haiku-4-5-20251001-v1:0",
     temperature=0,
     openai_api_key=os.environ['OPENAI_API_KEY'],
     openai_api_base=os.environ['OPENAI_BASE_URL'],
